@@ -1648,6 +1648,7 @@ async function initLive(){
     logTrain("<b style='color:#f87171'>[Lỗi]</b> "+lastLiveError);
   }
 }
+// Kiểm tra kỳ mới khi App đang mở — 10 phút/lần (tiết kiệm Worker Free)
 setInterval(async function(){
   if(document.hidden) return;
   try{
@@ -1663,7 +1664,7 @@ setInterval(async function(){
       logTrain("<b>[Kỳ mới]</b> "+fresh[0].id);
     }
   }catch(e){}
-},60000);
+},10*60*1000);
 
 window.onload=function(){
   var qel=document.getElementById("predictQtyVal");
@@ -1678,11 +1679,10 @@ window.onload=function(){
     logTrain("<b style='color:#f87171'>[Init]</b> "+(e&&e.message?e.message:e));
   });
   if(window.tf) tf.ready().then(function(){logTrain("<b>[TF]</b> "+tf.getBackend())});
-  // Mỗi 30 phút (khi tab còn sống): kiểm tra public + gọi Worker sync nền
+  // Nguồn công khai (GitHub): khi tab mở, kiểm tra kỳ mới — KHÔNG gọi Worker sync-public
+  // (đồng bộ KV nền do Cron Worker: 0 0,8,14,19,22 * * * — 5 lần/ngày)
   setInterval(async function(){
     try{
-      // Gợi ý Worker sync (chạy trên CF, không phụ thuộc tab nếu đã set Cron)
-      fetch(WORKER_BASE+"?action=sync-public&t="+Date.now()).catch(function(){});
       if(document.hidden) return;
       var gt=document.getElementById("gameTypeTf").value;
       var pub=await fetchPublicJsonl(gt, 40);
