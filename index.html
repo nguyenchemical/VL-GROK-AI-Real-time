@@ -381,6 +381,17 @@ body.light .set-row{background:rgba(0,0,0,.04);}
 
 <script>
 const WORKER_BASE="https://grok.bomeovn.workers.dev/";
+/** An toàn: luôn có setLiveStatus trước khi bất kỳ async nào chạy */
+function setLiveStatus(ok, text, isErr){
+  try{
+    var el=document.getElementById("dataStatus");
+    if(el){ el.classList.toggle("ok", !!ok); el.classList.toggle("err", !!isErr && !ok); }
+    var t=document.getElementById("dataStatusText");
+    if(t) t.textContent=text||(ok?"Live":"Offline");
+    if(typeof updateLivePanel==="function") updateLivePanel(ok, text, isErr);
+  }catch(e){}
+}
+
 // Data Live lưu trên Cloudflare KV — đọc qua Worker ?action=get-draws
 const APP_SHARED_SECRET="";
 const VIETLOTT_PATH={mega645:"645",power655:"655",lotto535:"535",max3d:"max-3d",max3dplus:"max-3d-plus",max3dpro:"max-3dpro"};
@@ -1017,6 +1028,17 @@ function applyMeterScore(score, setScores){
   }
 }
 
+// setLiveStatus defined early near WORKER_BASE (polyfill + full)
+setLiveStatus=function(ok, text, isErr){
+  var el=document.getElementById("dataStatus");
+  if(el){
+    el.classList.toggle("ok", !!ok);
+    el.classList.toggle("err", !!isErr && !ok);
+  }
+  var t=document.getElementById("dataStatusText");
+  if(t) t.textContent=text||(ok?"Live":"Offline");
+  try{ updateLivePanel(ok, text, isErr); }catch(e){}
+};
 function updateLivePanel(ok, text, isErr){
   var st=document.getElementById("lpStatus");
   var dw=document.getElementById("lpDraws");
@@ -1591,32 +1613,39 @@ async function trainAndPredict(){
 }
 
 async function initLive(){
-  var gameType=document.getElementById("gameTypeTf").value; currentGame=gameType;
-  setLiveStatus(false,"...");
-  resetMeter();
+  var gameType=(document.getElementById("gameTypeTf")&&document.getElementById("gameTypeTf").value)||currentGame||"max3dpro";
+  currentGame=gameType;
+  try{ setLiveStatus(false,"..."); }catch(e){}
+  try{ resetMeter(); }catch(e){}
   try{
     var fresh=await loadLiveData(gameType);
     if(!fresh||!fresh.length){
       rawDraws=[];
-      setLiveStatus(false,"No data");
-      logTrain("<b style='color:#fbbf24'>[Live]</b> Chưa có kỳ thật trên GitHub/Vietlott");
+      try{ setLiveStatus(false,"No data", true); }catch(e){}
+      logTrain("<b style='color:#fbbf24'>[Live]</b> Chưa có kỳ thật — thử nút Data công khai");
       return;
     }
     var newId=fresh[0]&&fresh[0].id;
     if(lastSeenDrawId&&newId&&lastSeenDrawId!==newId){
       lastPredictionProbs=null;
-      resetMeter();
+      try{ resetMeter(); }catch(e){}
       logTrain("<b>[Kỳ mới]</b> "+newId+" → reset Meter");
     }
     lastSeenDrawId=newId;
     rawDraws=fresh;
-    setLiveStatus(true,rawDraws.length+" kỳ");
-    var r=resolveAlgo(gameType);
-    document.getElementById("autoAlgoHint").textContent="Model: "+r.algo+" · "+r.reason;
+    lastLiveError="";
+    try{ setLiveStatus(true, rawDraws.length+" kỳ"); }catch(e){}
+    try{
+      var r=resolveAlgo(gameType);
+      var hint=document.getElementById("autoAlgoHint");
+      if(hint) hint.textContent="Model: "+r.algo+" · "+r.reason;
+    }catch(e){}
+    logTrain("<b style='color:#34d399'>[Live OK]</b> "+rawDraws.length+" kỳ · "+(lastDataSource||"")+" · "+(newId||""));
   }catch(e){
     rawDraws=[];
-    setLiveStatus(false,"Offline");
-    logTrain("<b style='color:#f87171'>[Lỗi]</b> "+(e.message||e));
+    lastLiveError=String(e&&e.message?e.message:e);
+    try{ setLiveStatus(false,"Offline", true); }catch(e2){}
+    logTrain("<b style='color:#f87171'>[Lỗi]</b> "+lastLiveError);
   }
 }
 setInterval(async function(){
@@ -1641,11 +1670,12 @@ window.onload=function(){
   if(qel) qel.textContent=String(predictQty);
   try{applyAutoAlgoUI(document.getElementById("gameTypeTf").value);updateNextDrawInfo(document.getElementById("gameTypeTf").value);}catch(e){}
   initLive().then(function(){
-    // Tự tải public nếu KV < 15 kỳ
     if(!rawDraws||rawDraws.length<15){
       logTrain("<b>[Auto]</b> KV mỏng → tải data công khai…");
       return refreshPublicData(false);
     }
+  }).catch(function(e){
+    logTrain("<b style='color:#f87171'>[Init]</b> "+(e&&e.message?e.message:e));
   });
   if(window.tf) tf.ready().then(function(){logTrain("<b>[TF]</b> "+tf.getBackend())});
   // Mỗi 30 phút (khi tab còn sống): kiểm tra public + gọi Worker sync nền
