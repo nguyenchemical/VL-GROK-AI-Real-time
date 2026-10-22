@@ -1499,7 +1499,7 @@ async function trainAndPredict(){
     }
     model.compile({optimizer:tf.train.adam(0.01),loss:"binaryCrossentropy"});
     progress.style.width="25%";
-    await model.fit(xs,ys,{epochs:epochs,batchSize:Math.min(32,xs.shape[0]),shuffle:true,callbacks:{onEpochEnd:async function(epoch,logs){
+    await model.fit(xs,ys,{epochs:epochs,batchSize:Math.min(32,xs.shape[0]),shuffle:false,callbacks:{onEpochEnd:async function(epoch,logs){
       progress.style.width=Math.floor(25+((epoch+1)/epochs)*60)+"%";
       logTrain("Epoch <b>"+(epoch+1)+"/"+epochs+"</b> loss:<b>"+(logs.loss!=null?logs.loss.toFixed(4):"—")+"</b>");
       await tf.nextFrame();
