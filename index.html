@@ -262,7 +262,8 @@ body.light .meter{background:rgba(0,0,0,.04);border-color:rgba(0,0,0,.06);}
 
 body.light .log{background:rgba(0,0,0,.04);color:#475569;border-color:rgba(0,0,0,.08);}
 .log b{color:#34d399;}
-.sets{flex:1;min-height:0;overflow-y:auto;margin:4px 0;max-height:28vh;}
+.sets{flex:0 0 auto;margin:4px 0;max-height:none;overflow:visible;}
+.sets.scrollable{flex:1;min-height:0;overflow-y:auto;max-height:28vh;-webkit-overflow-scrolling:touch;}
 .set-row{
   display:flex;align-items:center;gap:4px;padding:4px 6px;margin-bottom:3px;
   border-radius:8px;background:rgba(0,0,0,.18);flex-wrap:wrap;
@@ -552,31 +553,18 @@ function getActiveProbs(gameType){
   return buildFreqProbs(gameType);
 }
 
-function weightedSampleUnique(candidates, count, used){
+/** Chọn count số từ candidates đã xếp hạng — DETERMINISTIC, không Math.random */
+function weightedSampleUnique(candidates, count, used, offset){
   var pool=candidates.map(function(c){
-    return {number:c.number, prob:c.prob, w: used && used.has(c.number) ? Math.max(c.prob,0.001)*0.12 : Math.max(c.prob,0.001)};
-  }).filter(function(c){ return c.number!=null && !isNaN(c.number); });
-  // sort by weight desc as fallback order
-  pool.sort(function(a,b){return b.w-a.w});
+    return {number:c.number, prob:c.prob, w: used && used.has(c.number) ? Math.max(c.prob,0.001)*0.05 : Math.max(c.prob,0.001)};
+  }).filter(function(c){ return c.number!=null && !isNaN(c.number) && !(used&&used.has(c.number)); });
+  pool.sort(function(a,b){return b.w-a.w || a.number-b.number});
+  var off=(offset||0)%Math.max(pool.length,1);
+  // xoay vòng deterministic theo offset rồi lấy top sau xoay
+  if(off>0&&pool.length) pool=pool.slice(off).concat(pool.slice(0,off));
   var selected=[];
-  for(var i=0;i<count&&pool.length;i++){
-    var total=0;
-    for(var k=0;k<pool.length;k++) total+=pool[k].w;
-    if(total<=0){
-      // lấy phần tử đầu còn lại
-      selected.push(pool[0].number);
-      pool.splice(0,1);
-      continue;
-    }
-    var r=Math.random()*total;
-    var picked=-1;
-    for(var j=0;j<pool.length;j++){
-      r-=pool[j].w;
-      if(r<=0 || j===pool.length-1){ picked=j; break; }
-    }
-    if(picked<0) picked=0;
-    selected.push(pool[picked].number);
-    pool.splice(picked,1);
+  for(var i=0;i<pool.length&&selected.length<count;i++){
+    selected.push(pool[i].number);
   }
   return selected;
 }
@@ -715,7 +703,11 @@ function fillUniqueNumbers(main, count, maxN, preferScores){
   }
   return main.sort(function(a,b){return a-b});
 }
-function sampleFromProbs(gameType, probs){
+/**
+ * Sinh 1 vé matrix — DETERMINISTIC (offset theo trainCount + setIndex).
+ * usedGlobal: số đã dùng ở các vé trước trong cùng lần train → không trùng số giữa các bộ.
+ */
+function sampleFromProbs(gameType, probs, setIndex, usedGlobal){
   var spec=gameSpec(gameType);
   if(spec.isDigit){
     var tix=pickMax3dTickets(gameType, probs, 1);
@@ -726,27 +718,32 @@ function sampleFromProbs(gameType, probs){
   if(!raw) raw=buildFreqProbs(gameType);
   raw=ensurePlainProbs(raw, featureSize)||new Array(featureSize).fill(1/featureSize);
   var candidates=raw.map(function(p,i){return {number:i+1,prob:Math.max(Number(p)||0,0.001)}});
-  var used=new Set();
-  var main=weightedSampleUnique(candidates, spec.count, used);
-  // đảm bảo đủ số chính
+  var used=usedGlobal||new Set();
+  // offset thay đổi mỗi lần train + mỗi vé → bộ số khác nhau, không random
+  var idN=0;
+  if(rawDraws&&rawDraws[0]&&rawDraws[0].id) idN=parseInt(String(rawDraws[0].id).replace(/\D/g,""),10)||0;
+  var offset=(idN*13 + trainCount*29 + (setIndex||0)*41) % Math.max(featureSize,1);
+  var main=weightedSampleUnique(candidates, spec.count, used, offset);
   if(main.length<spec.count){
     main=fillUniqueNumbers(main, spec.count, featureSize, raw);
-  } else {
-    main=main.slice(0,spec.count).sort(function(a,b){return a-b});
+    // loại số đã dùng global
+    main=main.filter(function(n){return !used.has(n)});
+    if(main.length<spec.count) main=fillUniqueNumbers(main, spec.count, featureSize, raw);
   }
+  main=main.slice(0,spec.count).sort(function(a,b){return a-b});
   main.forEach(function(n){used.add(n)});
   if(spec.special){
     if(gameType==="power655"){
       var remain=candidates.filter(function(x){return !used.has(x.number)});
-      var sp=weightedSampleUnique(remain,1,used)[0];
+      var sp=weightedSampleUnique(remain,1,used,offset+7)[0];
       if(sp==null||used.has(sp)){
-        // ưu tiên theo score còn lại
         var best=-1,bestP=-1;
         for(var i=0;i<featureSize;i++){
           if(!used.has(i+1)&&raw[i]>bestP){ bestP=raw[i]; best=i+1; }
         }
         sp=best>0?best:1;
       }
+      used.add(sp);
       return main.concat([sp]);
     }
     if(gameType==="lotto535"){
@@ -759,8 +756,8 @@ function sampleFromProbs(gameType, probs){
       });
       var maxS=Math.max.apply(null,spFreq.concat([1]));
       var spCand=spFreq.map(function(f,i){return {number:i+1,prob:Math.max(f/maxS,0.05)}});
-      var sp=weightedSampleUnique(spCand,1,new Set())[0];
-      if(!sp||sp<1||sp>12) sp=1;
+      var sp=weightedSampleUnique(spCand,1,new Set(),offset+3)[0];
+      if(!sp||sp<1||sp>12) sp=((offset%12)+1);
       return main.concat([sp]);
     }
   }
@@ -1071,7 +1068,7 @@ function parsePublicLine(line, gameType){
 async function fetchPublicJsonl(gameType, maxLines){
   var url=PUBLIC_JSONL[gameType];
   if(!url) return [];
-  maxLines=maxLines||400;
+  maxLines=maxLines||200;
   var res=await fetchWithTimeout(url+"?t="+Date.now(),{cache:"no-cache"},20000);
   if(!res.ok) throw new Error("HTTP "+res.status+" public source");
   var text=await res.text();
@@ -1172,52 +1169,51 @@ async function loadLiveData(gameType){
   var collected=[];
   lastLiveError="";
   lastDataSource="—";
-  // 1) Cloudflare KV qua Worker
+  // 1+1b) KV + Public SONG SONG (nhanh, tránh treo)
+  var kvP=fetchWithTimeout(
+    WORKER_BASE+"?action=get-draws&game="+encodeURIComponent(gameType)+"&t="+Date.now(),
+    {cache:"no-cache"}, 5000
+  ).then(function(res){ return res.ok?res.json():[]; }).catch(function(e){ lastLiveError=String(e.message||e); return []; });
+  var cache=publicCache[gameType];
+  var fresh=cache && (Date.now()-cache.fetchedAt<6*3600*1000);
+  var pubP=fresh
+    ? Promise.resolve(cache.draws)
+    : fetchPublicJsonl(gameType, (String(gameType).indexOf("max3d")===0||gameType==="mega645"||gameType==="power655"||gameType==="lotto535")?200:40)
+        .catch(function(e){ if(!lastLiveError) lastLiveError=String(e.message||e); return []; });
   try{
-    var res=await fetchWithTimeout(
-      WORKER_BASE+"?action=get-draws&game="+encodeURIComponent(gameType)+"&t="+Date.now(),
-      {cache:"no-cache"},
-      8000
-    );
-    if(res.ok){
-      var data=await res.json();
-      if(Array.isArray(data)&&data.length){
-        collected=data.filter(function(d){return d&&d.id&&Array.isArray(d.numbers)});
-        lastDataSource="Cloudflare KV";
-        logTrain("<b>[Data]</b> "+collected.length+" kỳ từ Cloudflare KV");
-        if(collected[0].jackpot){
-          lastRealJackpotBillion=collected[0].jackpot/1e9;
-          document.getElementById("jackpotVal").textContent=lastRealJackpotBillion.toFixed(1)+" tỷ";
-        }
+    var pair=await Promise.all([kvP, pubP]);
+    var kvData=Array.isArray(pair[0])?pair[0].filter(function(d){return d&&d.id&&Array.isArray(d.numbers)}):[];
+    var pub=Array.isArray(pair[1])?pair[1]:[];
+    if(kvData.length){
+      collected=kvData;
+      lastDataSource="Cloudflare KV";
+      logTrain("<b>[Data]</b> "+kvData.length+" kỳ từ Cloudflare KV");
+      if(kvData[0].jackpot){
+        lastRealJackpotBillion=kvData[0].jackpot/1e9;
+        document.getElementById("jackpotVal").textContent=lastRealJackpotBillion.toFixed(1)+" tỷ";
       }
     }
-  }catch(e){ lastLiveError=(e.message||e)+""; }
-
-  // 1b) Nguồn công khai (nếu cache còn mới < 6h dùng cache, không thì fetch)
-  try{
-    var cache=publicCache[gameType];
-    var fresh=cache && (Date.now()-cache.fetchedAt<6*3600*1000);
-    var pub=fresh?cache.draws:await fetchPublicJsonl(gameType, gameType.indexOf("max3d")===0||gameType.indexOf("mega")===0||gameType.indexOf("power")===0||gameType.indexOf("lotto")===0?400:60);
-    if(pub&&pub.length){
+    if(pub.length){
       if(!fresh) publicCache[gameType]={draws:pub,fetchedAt:Date.now(),latestId:pub[0]&&pub[0].id};
       collected=mergeDraws(collected, pub);
-      lastDataSource=collected.length && lastDataSource==="Cloudflare KV"?"KV + Public GitHub":"Public GitHub";
+      lastDataSource=kvData.length?"KV + Public GitHub":"Public GitHub";
       logTrain("<b>[Public]</b> merge → "+collected.length+" kỳ");
+      lastLiveError="";
     }
-  }catch(e){
-    if(!collected.length) lastLiveError=(e.message||e)+"";
-  }
+  }catch(e){ lastLiveError=String(e.message||e); }
 
-  // 2) Live vietlott qua Worker proxy
+  // 2) Live vietlott — CHỈ khi data mỏng (<8 kỳ), timeout ngắn
+  if(collected.length>=8){
+    return collected.slice(0,500);
+  }
   var path=VIETLOTT_PATH[gameType]||"645";
   var target="https://vietlott.vn/vi/trung-thuong/ket-qua-trung-thuong/"+path;
   var proxies=[
-    function(u){return WORKER_BASE+"?url="+encodeURIComponent(u)},
-    function(u){return "https://api.allorigins.win/raw?url="+encodeURIComponent(u)}
+    function(u){return WORKER_BASE+"?url="+encodeURIComponent(u)}
   ];
   for(var pi=0;pi<proxies.length;pi++){
     try{
-      var res=await fetchWithTimeout(proxies[pi](target),{cache:"no-cache"},9000);
+      var res=await fetchWithTimeout(proxies[pi](target),{cache:"no-cache"},4000);
       if(!res.ok) continue;
       var html=await res.text();
       var draw=parseResultHtml(html,gameType);
@@ -1247,8 +1243,9 @@ async function loadLiveData(gameType){
 }
 
 function recommendedAlgo(gameType){
+  // Ưu tiên thuật toán NHANH trên mobile; LSTM chỉ khi user chọn thủ công
   if(gameType==="mega645"||gameType==="power655")
-    return {algo:"tf-lstm",label:"LSTM",reason:"Kho số lớn · chuỗi thời gian"};
+    return {algo:"tf-dense",label:"Dense (TF)",reason:"Kho số lớn · nhanh ổn định mobile"};
   if(gameType==="lotto535")
     return {algo:"random-forest",label:"Random Forest",reason:"Kho số vừa · tổng hợp cây"};
   if(gameType==="max3d")
@@ -1380,7 +1377,7 @@ async function trainAndPredict(){
   if(window.tf) await tf.nextFrame();
 
   // Giới hạn 100 kỳ gần nhất khi train TF — tránh treo mobile với 400 kỳ
-  var trainDraws=rawDraws.slice(0, Math.min(rawDraws.length, 100));
+  var trainDraws=rawDraws.slice(0, Math.min(rawDraws.length, 60));
   var chronological=trainDraws.slice().reverse();
   logTrain("<b>[Data]</b> Dùng "+chronological.length+"/"+rawDraws.length+" kỳ gần nhất để train");
   var vectors=chronological.map(function(d){
@@ -1459,8 +1456,8 @@ async function trainAndPredict(){
     } else logTrain("<b>[Freq]</b> Tần suất lịch sử thật");
     progress.style.width="85%";
   } else if(window.tf&&(algoType==="tf-dense"||algoType==="tf-lstm")){
-    var epochs=algoType==="tf-lstm"?8:6;
-    var timesteps=Math.min(4,Math.max(1,vectors.length-1));
+    var epochs=algoType==="tf-lstm"?5:4;
+    var timesteps=Math.min(3,Math.max(1,vectors.length-1));
     var useLstm=algoType==="tf-lstm"&&vectors.length>timesteps+2;
     var xs,ys,model;
     if(useLstm){
@@ -1468,23 +1465,19 @@ async function trainAndPredict(){
       for(var i=0;i<=vectors.length-timesteps-1;i++){seqIn.push(vectors.slice(i,i+timesteps));seqLab.push(vectors[i+timesteps])}
       xs=tf.tensor3d(seqIn); ys=tf.tensor2d(seqLab);
       model=tf.sequential();
-      model.add(tf.layers.lstm({units:48,inputShape:[timesteps,featureSize],returnSequences:false}));
-      model.add(tf.layers.dropout({rate:0.25}));
-      model.add(tf.layers.dense({units:32,activation:"relu"}));
+      model.add(tf.layers.lstm({units:24,inputShape:[timesteps,featureSize],returnSequences:false}));
       model.add(tf.layers.dense({units:featureSize,activation:"sigmoid"}));
       logTrain("<b>[LSTM]</b> Huấn luyện trên "+rawDraws.length+" kỳ thật");
     } else {
       xs=tf.tensor2d(vectors.slice(0,-1)); ys=tf.tensor2d(vectors.slice(1));
       model=tf.sequential();
-      model.add(tf.layers.dense({units:96,activation:"relu",inputShape:[featureSize]}));
-      model.add(tf.layers.dropout({rate:0.25}));
-      model.add(tf.layers.dense({units:48,activation:"relu"}));
+      model.add(tf.layers.dense({units:48,activation:"relu",inputShape:[featureSize]}));
       model.add(tf.layers.dense({units:featureSize,activation:"sigmoid"}));
       logTrain("<b>[Dense]</b> 96→48→"+featureSize+" · data thật");
     }
     model.compile({optimizer:tf.train.adam(0.01),loss:"binaryCrossentropy"});
     progress.style.width="25%";
-    await model.fit(xs,ys,{epochs:epochs,batchSize:Math.min(16,xs.shape[0]),shuffle:true,callbacks:{onEpochEnd:async function(epoch,logs){
+    await model.fit(xs,ys,{epochs:epochs,batchSize:Math.min(32,xs.shape[0]),shuffle:true,callbacks:{onEpochEnd:async function(epoch,logs){
       progress.style.width=Math.floor(25+((epoch+1)/epochs)*60)+"%";
       logTrain("Epoch <b>"+(epoch+1)+"/"+epochs+"</b> loss:<b>"+(logs.loss!=null?logs.loss.toFixed(4):"—")+"</b>");
       await tf.nextFrame();
@@ -1525,23 +1518,23 @@ async function trainAndPredict(){
   } else {
     var nSets=getPredictQty();
     var spec=gameSpec(gameType);
+    var usedGlobal=new Set();
     for(var c=0;c<nSets;c++){
-      var selected=sampleFromProbs(gameType, predictionData);
-      var need=spec.count+(spec.special?1:0);
-      var attempts=0;
-      while((!selected||selected.length<spec.count||allSets.some(function(s){return s.join("-")===selected.join("-")}))&&attempts++<50){
-        selected=sampleFromProbs(gameType, predictionData);
-      }
+      var selected=sampleFromProbs(gameType, predictionData, c, usedGlobal);
       if(!selected||selected.length<spec.count){
         selected=fillUniqueNumbers([],spec.count,spec.maxN,predictionData);
+        selected=selected.filter(function(n){return !usedGlobal.has(n)});
+        if(selected.length<spec.count) selected=fillUniqueNumbers(selected,spec.count,spec.maxN,predictionData);
+        selected.forEach(function(n){usedGlobal.add(n)});
         if(spec.special&&gameType==="power655"){
-          var u=new Set(selected);
-          for(var z=1;z<=55;z++) if(!u.has(z)){ selected=selected.concat([z]); break; }
+          for(var z=1;z<=55;z++) if(!usedGlobal.has(z)){ selected=selected.concat([z]); usedGlobal.add(z); break; }
         }
       }
       allSets.push(selected);
     }
   }
+  // 1–3 bộ: không cuộn; ≥4: bật cuộn dọc
+  listEl.className="sets"+(allSets.length>=4?" scrollable":"");
   allSets.forEach(function(selected,c){
     var row=document.createElement("div"); row.className="set-row";
     row.innerHTML='<span class="set-tag">#'+(c+1)+'</span><div style="display:flex;flex-wrap:wrap;gap:2px">'+renderBalls(selected,gameType)+'</div>';
